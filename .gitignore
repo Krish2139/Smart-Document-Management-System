@@ -1,0 +1,98 @@
+
+# ==========================================
+# Python Bytecode and Cache
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ==========================================
+# Python Build and Distribution
+# ==========================================
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# Virtual Environments
+# ==========================================
+venv/
+env/
+ENV/
+.venv/
+
+# ==========================================
+# Environment Variables and Secrets
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# Local Databases
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ==========================================
+# Local Document Storage
+# Keep folder structure using .gitkeep
+# ==========================================
+local_storage/documents/*
+!local_storage/documents/.gitkeep
+
+local_storage/temp/*
+!local_storage/temp/.gitkeep
+
+uploads/
+
+# ==========================================
+# Logs and Temporary Files
+# ==========================================
+*.log
+*.tmp
+
+# ==========================================
+# Testing and Coverage
+# ==========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ==========================================
+# IDEs and Editors
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# Operating System Files
+# ==========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# Node.js (if used in frontend)
+# ==========================================
+node_modules/
