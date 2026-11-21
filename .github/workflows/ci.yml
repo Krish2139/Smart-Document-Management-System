@@ -1,0 +1,57 @@
+
+name: Smart Document Management System CI
+
+# Trigger CI whenever code is pushed to main
+# or a pull request is created for main.
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+# Minimum permissions required for CI
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and Test Application
+
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Get the latest repository code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Configure Python
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # Step 3: Upgrade pip
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
+
+      # Step 4: Install project dependencies
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      # Step 5: Run automated tests
+      - name: Run Pytest
+        run: |
+          python -m pytest -v
+
+      # Step 6: Display successful completion
+      - name: CI Completed
+        if: success()
+        run: echo "Build and all automated tests passed successfully!"
