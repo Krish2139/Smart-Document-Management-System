@@ -96,3 +96,10 @@ desktop.ini
 # Node.js (if used in frontend)
 # ==========================================
 node_modules/
+
+# Local SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
