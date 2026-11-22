@@ -113,10 +113,17 @@ jobs:
             echo "Configuring pre-verified EC2_SSH_KNOWN_HOSTS from GitHub Secrets..."
             echo "${{ secrets.EC2_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
             chmod 644 ~/.ssh/known_hosts
+            echo "SSH_STRICT_HOST_CHECK=yes" >> "$GITHUB_ENV"
           else
-            echo "Notice: EC2_SSH_KNOWN_HOSTS not provided. Discovering host key via ssh-keyscan..."
-            ssh-keyscan -p "$SSH_PORT" -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-            chmod 644 ~/.ssh/known_hosts
+            echo "Notice: EC2_SSH_KNOWN_HOSTS secret not provided. Attempting discovery via ssh-keyscan..."
+            if ssh-keyscan -T 5 -p "$SSH_PORT" -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null && [ -s ~/.ssh/known_hosts ]; then
+              chmod 644 ~/.ssh/known_hosts
+              echo "Host key successfully retrieved via ssh-keyscan."
+              echo "SSH_STRICT_HOST_CHECK=yes" >> "$GITHUB_ENV"
+            else
+              echo "Notice: Host key not discovered ahead of time. Setting host key policy to 'accept-new'."
+              echo "SSH_STRICT_HOST_CHECK=accept-new" >> "$GITHUB_ENV"
+            fi
           fi
 
       # Step 5: Execute deployment script on EC2 (Single source of truth)
@@ -127,8 +134,16 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           SSH_PORT: ${{ secrets.EC2_PORT || '22' }}
         run: |
-          echo "Connecting to $EC2_USER@$EC2_HOST:$SSH_PORT and executing deployment script..."
-          ssh -o StrictHostKeyChecking=yes \
+          echo "=========================================================="
+          echo "Connecting to $EC2_USER@$EC2_HOST:$SSH_PORT..."
+          echo "Strict Host Checking: $SSH_STRICT_HOST_CHECK"
+          echo "Target Commit SHA:    $TARGET_SHA"
+          echo "=========================================================="
+
+          ssh -o StrictHostKeyChecking="$SSH_STRICT_HOST_CHECK" \
+              -o ConnectTimeout=30 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=3 \
               -o IdentitiesOnly=yes \
               -i ~/.ssh/deploy_key \
               -p "$SSH_PORT" \
