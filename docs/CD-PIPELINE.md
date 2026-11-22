@@ -1,117 +1,178 @@
-# Continuous Deployment (CD) Pipeline Documentation
+# Production CI/CD Pipeline Architecture & Operations Runbook
 
 **Application:** Smart Document Processing and Management System  
 **Repository:** `https://github.com/Krish2139/Smart-Document-Management-System`  
-**Target Environment:** AWS EC2 (`Smart-Document-Manager-Server`)  
-**Host / Elastic IP:** `44.218.34.239`  
+**Deployment Platform:** AWS EC2 (`Smart-Document-Manager-Server`)  
+**Elastic IP:** `44.218.34.239`  
 **Operating System:** Amazon Linux 2023  
-**Service:** `sdm-app.service` (Systemd) | Reverse Proxy: Nginx  
-**Author:** Senior DevOps Engineering  
+**Application Stack:** FastAPI, Python 3.12, Uvicorn, SQLite (WAL Mode), Nginx  
+**AWS Integration:** Amazon S3 (`smart-doc-manager-krish-2026`), DynamoDB (`SmartDocumentManagerReplica`), AWS Lambda (`SDMDocumentMetadataProcessor`)  
+**Role:** Senior DevOps Engineer & AWS Cloud Architect  
 
 ---
 
 ## Table of Contents
-1. [Overview: CI vs CD](#1-overview-ci-vs-cd)
-2. [Workflow Architecture & Triggering](#2-workflow-architecture--triggering)
-3. [Required GitHub Secrets](#3-required-github-secrets)
-4. [EC2 Server Preparation & Systemd Setup](#4-ec2-server-preparation--systemd-setup)
-5. [SSH Configuration & Host Key Verification](#5-ssh-configuration--host-key-verification)
-6. [Deployment Lifecycle & Safety Guarantees](#6-deployment-lifecycle--safety-guarantees)
-7. [Rollback Procedures](#7-rollback-procedures)
-8. [Testing & Verification](#8-testing--verification)
-9. [Troubleshooting Common Issues](#9-troubleshooting-common-issues)
-10. [Security Considerations & Hardening](#10-security-considerations--hardening)
+1. [Architecture Overview & Pipeline Lifecycle](#1-architecture-overview--pipeline-lifecycle)
+2. [CI vs CD Separation & Triggers](#2-ci-vs-cd-separation--triggers)
+3. [Exact Commit SHA Deployment Pattern](#3-exact-commit-sha-deployment-pattern)
+4. [Critical Production Data Protection & Safe SQLite Backups](#4-critical-production-data-protection--safe-sqlite-backups)
+5. [AWS Cloud Services Coexistence](#5-aws-cloud-services-coexistence)
+6. [Required GitHub Secrets](#6-required-github-secrets)
+7. [EC2 Server Configuration & Preparation](#7-ec2-server-configuration--preparation)
+8. [SSH Network Connectivity & Security Hardening](#8-ssh-network-connectivity--security-hardening)
+9. [Automated & Manual Rollback Procedures](#9-automated--manual-rollback-procedures)
+10. [Pipeline Verification & Testing Drills](#10-pipeline-verification--testing-drills)
+11. [Troubleshooting Guide](#11-troubleshooting-guide)
 
 ---
 
-## 1. Overview: CI vs CD
+## 1. Architecture Overview & Pipeline Lifecycle
 
-| Metric / Phase | Continuous Integration (CI) | Continuous Deployment (CD) |
-| :--- | :--- | :--- |
-| **Workflow File** | `.github/workflows/ci.yml` | `.github/workflows/cd.yml` |
-| **Purpose** | Validate code quality, syntax, build integrity, and test coverage. | Safely deploy validated code to the AWS EC2 production server. |
-| **Trigger** | Pull Requests to `main` and direct pushes to `main`. | Successful completion of CI on the `main` branch (or manual dispatch). |
-| **Environment** | Ephemeral GitHub-hosted Ubuntu runner (`ubuntu-latest`). | Production AWS EC2 instance (`Smart-Document-Manager-Server`). |
-| **Artifacts** | Test reports (pytest, coverage, compilation logs). | Running systemd service (`sdm-app.service`), updated code checkout. |
-| **Failure Impact** | Blocks PR merge; alerts developer without affecting production. | Aborts update, rolls back to previous commit, alerts operations. |
-
----
-
-## 2. Workflow Architecture & Triggering
-
-The CD pipeline uses GitHub Actions' native `workflow_run` event to link deployment directly to successful test runs on the `main` branch.
+The deployment automation implements a decoupled, fail-safe pipeline connecting GitHub Actions to your AWS EC2 instance:
 
 ```mermaid
 flowchart TD
-    A["Developer commits & pushes to 'main'"] --> B["GitHub Action: CI Workflow (.github/workflows/ci.yml)"]
-    B --> C{"Run Pytest & Dependency Builds"}
-    C -->|Failure| D["CI Fails & Notifications Sent<br>(Deployment Never Triggered)"]
-    C -->|Success| E["CI Completes Successfully on 'main'"]
-    E --> F["GitHub Action: CD Workflow (.github/workflows/cd.yml)"]
-    F --> G{"Workflow Guard Verification:<br>event == 'push' && conclusion == 'success'"}
-    G -->|No| H["Halt Execution (No Action)"]
-    G -->|Yes| I["Acquire Deployment Lock & Connect via SSH"]
-    I --> J["Fetch Code, Verify Dependencies & Bytecode"]
-    J --> K["Restart sdm-app.service & Probe /api/health"]
-    K -->|Health Check 200 OK| L["Deployment Marked Successful"]
-    K -->|Health Check Fails| M["Automatic Rollback to Previous Commit & Service Recovery"]
+    A["Developer pushes code to 'main'"] --> B["GitHub CI Workflow (.github/workflows/ci.yml)"]
+    B --> C["Install Dependencies & Compile Python Bytecode"]
+    C --> D["Execute Pytest Suite (Mocked AWS / Isolated DB)"]
+    D -->|Failure| E["CI Fails & Halts (CD Never Executes)"]
+    D -->|Success (All 63 Tests Pass)| F["CI Completes Successfully"]
+    
+    F --> G["GitHub CD Workflow (.github/workflows/cd.yml)"]
+    G --> H{"Verify Trigger Guard:<br>event == 'push' && conclusion == 'success'"}
+    H -->|No| I["Halt CD (E.g. PR runs never deploy)"]
+    H -->|Yes| J["Extract Exact Verified Commit SHA"]
+    J --> K["Open Secure SSH Connection to EC2 (44.218.34.239)"]
+    K --> L["Acquire OS flock Lock (/tmp/sdm_deploy.lock)"]
+    L --> M["Create Safe Timestamped SQLite Online Backup"]
+    M --> N["Fetch & Checkout Exact Commit SHA"]
+    N --> O["Sync Dependencies only if requirements.txt changed"]
+    O --> P["Pre-Flight Compilation & FastAPI Import Verification"]
+    P -->|Verification Fails| Q["Abort without restart & Roll back to previous commit"]
+    P -->|Verification Passes| R["Restart sdm-app.service"]
+    R --> S{"Probe http://127.0.0.1:8000/api/health (Max 15 Retries)"}
+    S -->|HTTP 200 OK| T["Deployment Complete & Successful"]
+    S -->|Health Check Fails| U["Auto-Rollback to previous commit & Recover Service"]
 ```
 
-### Trigger Configuration
-In `.github/workflows/cd.yml`:
-```yaml
-on:
-  workflow_run:
-    workflows: ["Smart Document Management System CI"]
-    types:
-      - completed
-    branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      reason:
-        description: "Reason for manual deployment trigger"
-        required: false
-        default: "Manual deployment trigger"
-```
+---
 
-### Job Guard Condition
+## 2. CI vs CD Separation & Triggers
+
+| Pipeline Component | Continuous Integration (CI) | Continuous Deployment (CD) |
+| :--- | :--- | :--- |
+| **Workflow File** | `.github/workflows/ci.yml` | `.github/workflows/cd.yml` |
+| **Trigger Events** | Pull Requests targeting `main`, direct pushes to `main`. | Successful completion of CI on `main` via `workflow_run`, or manual `workflow_dispatch`. |
+| **Execution Host** | GitHub-hosted ephemeral runner (`ubuntu-latest`). | Production AWS EC2 instance (`44.218.34.239`). |
+| **Target Commit** | The commit pushed or PR head commit. | **Exact commit SHA** that passed the triggering CI run. |
+| **AWS Interaction** | **Zero AWS access:** Uses mocked credentials and isolated test storage. | SSH deployment to EC2; updates code without touching S3/DynamoDB/Lambda. |
+| **Failure Response** | Blocks merge, sends notification. | Aborts update, rolls back code, restarts previous version, alerts team. |
+
+### Why Pull Requests Never Deploy
+In `.github/workflows/cd.yml`, the job guard condition explicitly specifies:
 ```yaml
 if: >
   github.event_name == 'workflow_dispatch' ||
   (github.event_name == 'workflow_run' &&
    github.event.workflow_run.event == 'push' &&
-   github.event.workflow_run.conclusion == 'success')
+   github.event.workflow_run.conclusion == 'success' &&
+   github.event.workflow_run.head_branch == 'main')
 ```
-- **Pull Request Protection:** When CI runs on a Pull Request targeting `main`, `event` is `'pull_request'`, so CD does **not** trigger.
-- **Merge/Push Execution:** Only when the PR is merged into `main` (or code is pushed directly to `main`) and all 63 automated tests pass, CD proceeds.
-- **Manual Control:** Developers can trigger deployment manually from the GitHub Actions tab via `workflow_dispatch`.
+When CI runs on a Pull Request, `github.event.workflow_run.event` is `'pull_request'`, so CD is immediately bypassed. Only when a PR is merged (firing a `push` event on `main`) and all tests pass does CD execute.
 
 ---
 
-## 3. Required GitHub Secrets
+## 3. Exact Commit SHA Deployment Pattern
 
-Configure the following secrets in the GitHub repository under **Settings &rarr; Secrets and variables &rarr; Actions &rarr; Repository secrets**:
+> [!CAUTION]
+> **The `origin/main` Race Condition Danger:**  
+> A naive deployment script that executes `git reset --hard origin/main` deploys whatever commit is currently at the tip of the remote repository. If developer Alice pushes commit `A`, triggering CI, and 30 seconds later developer Bob pushes commit `B`, when commit `A`'s CI completes, a naive CD would deploy commit `B`—which has **never been tested**!
 
-| Secret Name | Required? | Example Value | Description |
+### How Our Pipeline Eliminates This Risk:
+1. When CI succeeds on commit `A`, GitHub Actions passes `workflow_run.head_sha` directly to the CD workflow.
+2. The CD workflow resolves this as `TARGET_SHA`.
+3. The deployment script explicitly executes:
+   ```bash
+   git fetch origin "$TARGET_SHA"
+   git checkout "$TARGET_SHA"
+   ```
+4. It verifies that `git rev-parse HEAD` matches `$TARGET_SHA`.
+5. Only the code that **fully passed tests** is deployed to the production server.
+
+---
+
+## 4. Critical Production Data Protection & Safe SQLite Backups
+
+Production applications hold irreplaceable data. The deployment automation strictly enforces data protection:
+
+### Strict Zero-Data-Loss Invariants:
+1. **Never Runs Destructive Git Commands:** `git clean -fd`, `git clean -fdx`, and `rm -rf` are banned from deployment scripts.
+2. **Untracked File Integrity:** Git checkouts only update tracked source files. Local production files (`.env`, `smart_document_manager.db`, `smart_document_manager.db-wal`, `smart_document_manager.db-shm`, and `local_storage/`) are never overwritten.
+3. **Automated Point-in-Time SQLite Backup:**
+   Before any code is updated, `scripts/deploy.sh` creates a timestamped online backup outside the git repository in `/home/ec2-user/backups/`:
+   ```bash
+   sqlite3 smart_document_manager.db ".backup '/home/ec2-user/backups/smart_document_manager_backup_$(date +%Y%m%d_%H%M%S).db'"
+   ```
+   *Why SQLite Online Backup API?* Standard file copies (`cp`) can corrupt SQLite databases running in Write-Ahead Logging (WAL) mode if an active transaction is writing. The `.backup` command coordinates with the SQLite lock manager to flush WAL pages safely and create a bit-perfect snapshot.
+4. **Historical Backup Preservation:** Previous backup files in `/home/ec2-user/backups/` are never overwritten or deleted by deployments.
+
+---
+
+## 5. AWS Cloud Services Coexistence
+
+Your production application integrates multiple AWS services:
+- **Amazon S3 (`smart-doc-manager-krish-2026`):** Document object store.
+- **Amazon DynamoDB (`SmartDocumentManagerReplica`):** Metadata replication table.
+- **AWS Lambda (`SDMDocumentMetadataProcessor`):** Document processing triggers.
+- **Amazon CloudWatch:** System and application metrics.
+
+### Security & Access Policy:
+- The EC2 instance accesses AWS services exclusively through its **EC2 IAM Instance Profile**.
+- No AWS access keys (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are committed to Git, stored in GitHub Secrets, or hardcoded in scripts.
+- The deployment process updates application code in `/home/ec2-user/Smart-Document-Management-System` without recreating or modifying any AWS IAM roles, Lambda triggers, DynamoDB tables, or S3 buckets.
+
+---
+
+## 6. Required GitHub Secrets
+
+Configure these secrets in GitHub under **Settings &rarr; Secrets and variables &rarr; Actions &rarr; Repository secrets**:
+
+| Secret Name | Required? | Example Value | Purpose |
 | :--- | :---: | :--- | :--- |
-| `EC2_HOST` | **Yes** | `44.218.34.239` | Public Elastic IP address or DNS of the EC2 instance. |
-| `EC2_USER` | **Yes** | `ec2-user` | The SSH operating system user on Amazon Linux 2023. |
-| `EC2_SSH_KEY` | **Yes** | `-----BEGIN RSA PRIVATE KEY-----...` | Private SSH key (PEM / OpenSSH format) matching the EC2 key pair. |
-| `EC2_SSH_KNOWN_HOSTS`| **Recommended** | `44.218.34.239 ecdsa-sha2-nistp256 AAAAE2...` | Public host key fingerprint for strict host verification. |
-| `EC2_PORT` | Optional | `22` | SSH port (defaults to 22 if omitted). |
+| `EC2_HOST` | **Yes** | `44.218.34.239` | Public Elastic IP address of the EC2 instance. |
+| `EC2_USER` | **Yes** | `ec2-user` | Operating system SSH user on Amazon Linux 2023. |
+| `EC2_SSH_KEY` | **Yes** | `-----BEGIN RSA PRIVATE KEY-----...` | Private SSH key matching the key pair assigned to the EC2 instance. |
+| `EC2_SSH_KNOWN_HOSTS` | **Recommended** | `44.218.34.239 ecdsa-sha2-nistp256 AAAAE2...` | Cryptographic public host key for MITM protection. |
+| `EC2_PORT` | Optional | `22` | Custom SSH port (defaults to 22 if omitted). |
 
-> [!IMPORTANT]
-> **Host Key Security:** If `EC2_SSH_KNOWN_HOSTS` is provided, the runner performs cryptographic host verification against Man-in-the-Middle (MITM) attacks. If omitted, the workflow will use `ssh-keyscan` as a fallback.
+> [!TIP]
+> To obtain the `EC2_SSH_KEY` value from your local machine, run:
+> ```powershell
+> Get-Content "$HOME\Downloads\smart-document-manager-key.pem" -Raw | Set-Clipboard
+> ```
+> And paste directly into the GitHub Secret value box.
 
 ---
 
-## 4. EC2 Server Preparation & Systemd Setup
+## 7. EC2 Server Configuration & Preparation
 
-To ensure the deployment runner can restart the application without interactive password prompts, perform the following one-time configuration on the EC2 instance.
+Run these one-time configuration steps on your EC2 instance via SSH:
 
-### Step 1: Systemd Service Unit (`/etc/systemd/system/sdm-app.service`)
-Create or verify the service file:
+### A. Sudoers Rule for Passwordless Service Control
+Allow `ec2-user` to manage `sdm-app.service` without interactive sudo password prompts:
+```bash
+sudo visudo -f /etc/sudoers.d/sdm-app
+```
+Add the line:
+```text
+ec2-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart sdm-app.service, /usr/bin/systemctl status sdm-app.service, /usr/bin/systemctl is-active sdm-app.service, /usr/bin/journalctl -u sdm-app.service*
+```
+Save and enforce permissions:
+```bash
+sudo chmod 440 /etc/sudoers.d/sdm-app
+```
+
+### B. Systemd Unit File (`/etc/systemd/system/sdm-app.service`)
 ```ini
 [Unit]
 Description=Smart Document Processing and Management System (FastAPI)
@@ -128,37 +189,21 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=15
 
-# Sandboxing & Security
+# Security sandboxing
 NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-Enable and start the service:
+Reload and start:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable sdm-app.service
 sudo systemctl start sdm-app.service
 ```
 
-### Step 2: Sudoers Configuration for `ec2-user` (`/etc/sudoers.d/sdm-app`)
-Grant `ec2-user` scoped permission to manage `sdm-app.service` without requiring a password:
-```bash
-sudo visudo -f /etc/sudoers.d/sdm-app
-```
-Add the following line:
-```
-ec2-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart sdm-app.service, /usr/bin/systemctl status sdm-app.service, /usr/bin/systemctl is-active sdm-app.service, /usr/bin/journalctl -u sdm-app.service*
-```
-Save and ensure file permissions:
-```bash
-sudo chmod 440 /etc/sudoers.d/sdm-app
-```
-
-### Step 3: Nginx Reverse Proxy (`/etc/nginx/conf.d/sdm.conf`)
-Ensure Nginx routes external HTTP/HTTPS traffic to the Uvicorn application on port 8000:
+### C. Nginx Reverse Proxy (`/etc/nginx/conf.d/sdm.conf`)
 ```nginx
 server {
     listen 80;
@@ -183,128 +228,123 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ---
 
-## 5. SSH Configuration & Host Key Verification
+## 8. SSH Network Connectivity & Security Hardening
 
-### Obtaining the Host Key for `EC2_SSH_KNOWN_HOSTS`
-Run this command from your local terminal to obtain the cryptographic host key:
-```bash
-ssh-keyscan -H 44.218.34.239
-```
-Copy the output line (e.g. `44.218.34.239 ssh-ed25519 AAAAC3...`) and save it as the repository secret `EC2_SSH_KNOWN_HOSTS`.
+> [!WARNING]
+> **Never open SSH Port 22 to `0.0.0.0/0`!**  
+> Exposing port 22 to the public internet makes your EC2 instance vulnerable to brute-force credential stuffing and exploit scanners.
 
-### Verifying SSH Access Locally
-Verify connection using your private key:
-```bash
-ssh -i /path/to/ec2-key.pem ec2-user@44.218.34.239 "uptime"
-```
+If GitHub Actions runners cannot reach port 22 because your EC2 Security Group restricts inbound SSH, choose one of these three industry-standard patterns:
 
----
+### Option 1: GitHub Self-Hosted Runner on EC2 (Recommended)
+Install a GitHub Actions self-hosted runner directly on your EC2 instance:
+1. In your GitHub repository: **Settings &rarr; Actions &rarr; Runners &rarr; New self-hosted runner &rarr; Linux**.
+2. Run the provided download and install commands on EC2 under `/home/ec2-user/actions-runner`.
+3. Configure it as a system service: `sudo ./svc.sh install && sudo ./svc.sh start`.
+4. Update `cd.yml`: Change `runs-on: ubuntu-latest` to `runs-on: self-hosted`.
+- **Benefits:** **Zero open inbound ports required!** The runner connects outbound over HTTPS (port 443) to GitHub. No SSH keys needed in GitHub Secrets.
 
-## 6. Deployment Lifecycle & Safety Guarantees
+### Option 2: Dynamic Security Group Ingress Rule via AWS CLI
+If using GitHub-hosted runners (`ubuntu-latest`):
+1. In `cd.yml`, query the runner's public IP: `RUNNER_IP=$(curl -s https://api.ipify.org)`.
+2. Add a step using an IAM role/OIDC to authorize the IP:
+   ```bash
+   aws ec2 authorize-security-group-ingress --group-id <SG_ID> --protocol tcp --port 22 --cidr "${RUNNER_IP}/32"
+   ```
+3. Run the SSH deployment.
+4. Revoke the rule in an `if: always()` step:
+   ```bash
+   aws ec2 revoke-security-group-ingress --group-id <SG_ID> --protocol tcp --port 22 --cidr "${RUNNER_IP}/32"
+   ```
 
-Every deployment follows a strict 7-stage pipeline executing directly on the target instance:
-
-```
-[1/7] Acquire Lock  --> [2/7] Pre-flight Check --> [3/7] Git Controlled Fetch
-        |
-[4/7] Dependency Sync -> [5/7] Bytecode Validation -> [6/7] Service Restart
-        |
-[7/7] Health Verification (Probe /api/health with automatic rollback)
-```
-
-### Critical Production Protections:
-1. **Never Overwrites `.env`:** The deployment script checks for the existence of `.env` before and after updating code. Because `.env` is listed in `.gitignore`, Git does not track or overwrite it.
-2. **Never Deletes Production Storage:** `local_storage/documents/` and `local_storage/temp/` are untouched.
-3. **Preserves SQLite Database:** `smart_document_manager.db` (including `-wal` and `-shm` write-ahead logs) is untracked and retained in place across all deployments.
-4. **Preserves AWS Cloud Integrations:** DynamoDB replication, Lambda triggers, S3 storage providers, and CloudWatch metrics configs are preserved.
-5. **No Blind `git clean`:** We deliberately omit `git clean -fdx`.
-6. **Concurrent Deployment Lock:** Uses `flock -n /tmp/sdm_deploy.lock` and GitHub Actions `concurrency` to prevent simultaneous overlapping deployments.
-7. **Zero-Downtime Validation:** Python bytecode (`compileall`) and FastAPI module loading are checked *before* restarting the systemd service. If syntax or dependencies are broken, the service is never restarted.
+### Option 3: AWS Systems Manager (SSM) Session Manager
+Install `session-manager-plugin` on the runner and execute commands via `aws ssm send-command` without SSH port 22.
 
 ---
 
-## 7. Rollback Procedures
+## 9. Automated & Manual Rollback Procedures
 
-### Automatic Rollback (Built into the Pipeline)
-If the new code fails Python bytecode compilation, fails module import, or if the systemd health probe fails to return `HTTP 200` from `/api/health` within 30 seconds:
-1. The deployment script catches the failure immediately.
-2. It prints the latest journalctl logs: `sudo journalctl -u sdm-app.service -n 50 --no-pager`.
-3. It automatically rolls back Git to the previous commit: `git reset --hard $PREV_COMMIT`.
-4. It restarts `sdm-app.service` using the previous stable code.
-5. It fails the GitHub Actions job with exit code `1` to alert the team.
+### Automated Rollback (In-Pipeline)
+If the new commit fails Python compilation, fails FastAPI module import, or fails the `/api/health` HTTP probe:
+1. The script displays the error and dumps recent `journalctl` logs.
+2. It resets the working directory to the previously deployed commit: `git checkout "$PREV_COMMIT"`.
+3. It restarts `sdm-app.service`.
+4. It exits with code `1`, alerting you via GitHub Actions notifications.
 
-### Manual Rollback (Operator Emergency Run)
-If an unexpected behavioral bug appears in production after a successful deployment, roll back manually via SSH:
-
+### Manual Rollback Procedure
+If a functional bug is discovered after a successful deployment:
 ```bash
-# 1. Connect to EC2
-ssh -i /path/to/key.pem ec2-user@44.218.34.239
+# 1. SSH into the instance
+ssh -i /path/to/smart-document-manager-key.pem ec2-user@44.218.34.239
 
 # 2. Navigate to project
 cd /home/ec2-user/Smart-Document-Management-System
 
-# 3. View deployment history
+# 3. View recent commit history
 git log --oneline -n 5
 
-# 4. Roll back to the previous stable commit (e.g., abc1234)
-git reset --hard <STABLE_COMMIT_HASH>
+# 4. Check out the previous stable commit (e.g. 7b5bf9d)
+git checkout <STABLE_COMMIT_SHA>
 
-# 5. Restart the service
+# 5. Restart application service
 sudo systemctl restart sdm-app.service
 
 # 6. Verify health
 curl -f http://127.0.0.1:8000/api/health
 ```
 
----
+### Database Restoration from Point-in-Time Backup
+If database corruption occurs, restore from the timestamped snapshot:
+```bash
+# 1. Stop service
+sudo systemctl stop sdm-app.service
 
-## 8. Testing & Verification
+# 2. Locate latest backup
+ls -lt /home/ec2-user/backups/
 
-### Dry-Run / Manual Trigger
-1. In the GitHub repository, navigate to the **Actions** tab.
-2. Select **Continuous Deployment (CD)** from the left sidebar.
-3. Click **Run workflow** &rarr; select branch `main` &rarr; click **Run workflow**.
-4. Observe real-time deployment logs for each stage:
-   - Acquiring deployment lock
-   - Verifying `.env`
-   - Git fetch & checkout
-   - Dependency checksum evaluation
-   - Bytecode compilation check
-   - Service restart & HTTP health check
+# 3. Restore snapshot
+cp -p /home/ec2-user/backups/smart_document_manager_backup_<TIMESTAMP>.db smart_document_manager.db
 
-### Automated Production Flow
-1. Create a feature branch and submit a Pull Request to `main`.
-2. Verify that **CI (Smart Document Management System CI)** executes tests and passes. (Notice that CD is **not** triggered yet).
-3. Merge the Pull Request into `main`.
-4. The CI workflow triggers automatically on push to `main`.
-5. Upon CI success, the **Continuous Deployment (CD)** workflow starts automatically and deploys the code to EC2.
+# 4. Restart service
+sudo systemctl restart sdm-app.service
+```
 
 ---
 
-## 9. Troubleshooting Common Issues
+## 10. Pipeline Verification & Testing Drills
 
-| Issue / Error | Probable Cause | Resolution |
+1. **Test CI Workflow:**
+   Push a branch with a test commit and open a PR to `main`. Confirm all 63 Pytest tests pass and compilation succeeds.
+2. **Test CD Manual Dispatch:**
+   Go to GitHub &rarr; **Actions** &rarr; select **Continuous Deployment (CD)** &rarr; click **Run workflow** on `main`. Observe live execution logs.
+3. **Test Health Endpoint:**
+   Verify production health from your browser or terminal:
+   ```bash
+   curl http://44.218.34.239/api/health
+   ```
+   Expected response:
+   ```json
+   {
+     "status": "healthy",
+     "app_name": "Smart Document Processing and Management System",
+     "version": "1.0.0",
+     "environment": "development",
+     "components": {
+       "database": {"status": "healthy", "details": "SQLite connected and responsive"},
+       "storage": {"status": "healthy", "details": "Local storage writable and verified"}
+     }
+   }
+   ```
+
+---
+
+## 11. Troubleshooting Guide
+
+| Symptom | Root Cause | Solution |
 | :--- | :--- | :--- |
-| `Secret EC2_SSH_KEY is not configured` | Missing repository secrets in GitHub. | Add `EC2_SSH_KEY`, `EC2_HOST`, and `EC2_USER` in Repository Settings &rarr; Secrets. |
-| `Permission denied (publickey)` | SSH key mismatch or wrong user. | Verify `EC2_USER` is `ec2-user` and `EC2_SSH_KEY` matches the public key in `~/.ssh/authorized_keys`. |
-| `Another deployment is currently in progress` | Stale lockfile at `/tmp/sdm_deploy.lock`. | Check if a deployment is running (`ps aux \| grep deploy`). If stale, remove `/tmp/sdm_deploy.lock`. |
-| `sudo: a password is required` | Missing sudoers rule for `systemctl`. | Add the `/etc/sudoers.d/sdm-app` entry detailed in [Section 4](#4-ec2-server-preparation--systemd-setup). |
-| `Health check probe failed (000 / 500)` | App startup crash or database issue. | Review application logs: `sudo journalctl -u sdm-app.service -n 100 --no-pager`. |
-| `requirements.txt install timeout` | Slow pip compilation on small EC2 instance. | Ensure pre-built wheels are used: `pip install --no-cache-dir -r requirements.txt`. |
-
----
-
-## 10. Security Considerations & Hardening
-
-1. **Least Privilege SSH Access:**
-   - Restrict inbound SSH port 22 in the EC2 Security Group to GitHub Actions CIDR blocks or your bastion/VPN IP rather than `0.0.0.0/0`.
-   - Consider AWS Systems Manager (SSM) Session Manager for agent-based SSH without exposing port 22.
-2. **Key Hygiene:**
-   - Use an ED25519 or 4096-bit RSA SSH deployment key dedicated solely to CD automation.
-   - Rotate deployment keys periodically.
-3. **Strict File Permissions on EC2:**
-   - `.env`: `chmod 600 .env` (readable only by `ec2-user`).
-   - SQLite DB: `chmod 600 smart_document_manager.db*`.
-   - `local_storage/`: `chmod 700 local_storage/documents`.
-4. **Environment Secrets Management:**
-   - Sensitive AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) should remain in `.env` on EC2 or be delivered securely via EC2 IAM Roles (`Instance Profile`) rather than passing through GitHub Secrets.
+| `Secret EC2_SSH_KEY is not configured` | Secret missing from GitHub repository. | Add `EC2_SSH_KEY` in GitHub Settings &rarr; Secrets &rarr; Actions. |
+| `Permission denied (publickey)` | SSH key mismatch or wrong user. | Verify `EC2_USER=ec2-user` and `EC2_SSH_KEY` matches the public key in `/home/ec2-user/.ssh/authorized_keys`. |
+| `Another deployment is currently executing` | Stale lockfile at `/tmp/sdm_deploy.lock`. | Check if a deployment process is running (`ps aux \| grep deploy`). If stale, remove `/tmp/sdm_deploy.lock`. |
+| `sudo: a password is required` | Sudoers rule missing. | Configure `/etc/sudoers.d/sdm-app` as shown in [Section 7](#7-ec2-server-configuration--preparation). |
+| `Health check probe failed (status 000)` | Service failed to start or port 8000 closed. | Inspect logs: `sudo journalctl -u sdm-app.service -n 50 --no-pager`. |
+| `ssh: connect to host 44.218.34.239 port 22: Connection timed out` | EC2 Security Group blocking runner IP. | Implement Option 1 (Self-Hosted Runner) or Option 2 (Dynamic Security Group Ingress) in [Section 8](#8-ssh-network-connectivity--security-hardening). |

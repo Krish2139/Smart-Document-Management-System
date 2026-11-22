@@ -1,33 +1,30 @@
-
 name: Smart Document Management System CI
 
-# Trigger CI whenever code is pushed to main
-# or a pull request is created for main.
+# Trigger CI on pushes to main or pull requests targeting main
 on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
 
-# Minimum permissions required for CI
+# Principle of least privilege permissions
 permissions:
   contents: read
 
 jobs:
   build-and-test:
-    name: Build and Test Application
-
+    name: Build, Compile, and Test Application
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      # Step 1: Get the latest repository code
+      # Step 1: Check out repository code
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 2: Configure Python
+      # Step 2: Configure Python runtime with caching
       - name: Set Up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -35,23 +32,55 @@ jobs:
           cache: "pip"
           cache-dependency-path: requirements.txt
 
-      # Step 3: Upgrade pip
-      - name: Upgrade pip
+      # Step 3: Upgrade pip and package management tools
+      - name: Upgrade Pip
         run: |
           python -m pip install --upgrade pip
 
-      # Step 4: Install project dependencies
-      - name: Install Dependencies
+      # Step 4: Install project and testing dependencies
+      - name: Install Project & Test Dependencies
         run: |
           pip install -r requirements.txt
           pip install pytest
 
-      # Step 5: Run automated tests
-      - name: Run Pytest
+      # Step 5: Python bytecode compilation check (verify syntax across all modules)
+      - name: Verify Python Bytecode Compilation
         run: |
-          python -m pytest -v
+          echo "Compiling Python source code across backend/ and tests/..."
+          python -m compileall backend/
+          python -m compileall tests/
+          echo "Bytecode compilation check passed: no syntax errors detected."
 
-      # Step 6: Display successful completion
-      - name: CI Completed
+      # Step 6: Run Pytest test suite with isolated test configuration (Zero Production Access)
+      - name: Run Pytest Test Suite
+        env:
+          APP_ENV: testing
+          DEBUG: "false"
+          DATABASE_URL: sqlite:///./test_ci.db
+          STORAGE_TYPE: local
+          LOCAL_STORAGE_DIR: ./test_ci_storage
+          # Mock AWS credentials to guarantee tests NEVER touch production AWS resources
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: mock-ci-test-key
+          AWS_SECRET_ACCESS_KEY: mock-ci-test-secret
+          S3_BUCKET: mock-ci-test-bucket
+          DYNAMODB_TABLE: mock-ci-test-table
+        run: |
+          python -m pytest -v --tb=short
+
+      # Step 7: Clean up ephemeral test artifacts
+      - name: Cleanup Ephemeral Test Artifacts
+        if: always()
+        run: |
+          rm -rf test_ci.db test_ci.db-shm test_ci.db-wal ./test_ci_storage
+          echo "Cleaned up ephemeral CI database and test storage."
+
+      # Step 8: Signal successful CI completion
+      - name: CI Build & Test Summary
         if: success()
-        run: echo "Build and all automated tests passed successfully!"
+        run: |
+          echo "=========================================================="
+          echo "CI Pipeline Completed Successfully!"
+          echo "Commit: ${{ github.sha }}"
+          echo "All syntax compilation and automated tests PASSED."
+          echo "=========================================================="
